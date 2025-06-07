@@ -1,49 +1,108 @@
+#Email M365 subscribed SKUs..
 
-Connect-MgGraph -Scopes "User.Read.All", "Organization.Read.All"
+# header autho for email
+$tenantId = '' #Get-Content C:\Scripts\Config\tenantId.txt -AsSecureString | ConvertFrom-SecureString
+$clientId = '' #Get-Content C:\Scripts\Config\clientId.txt -AsSecureString | ConvertFrom-SecureString
+$clientSecret = '' #Get-Content C:\Scripts\Config\clientSecret.txt -AsSecureString | ConvertFrom-SecureString
+$tokenResponse = Invoke-RestMethod -Method Post -Uri "https://login.microsoftonline.com/$tenantId/oauth2/v2.0/token" -Body @{
+    client_id     = $clientId
+    scope         = "https://graph.microsoft.com/.default"
+    client_secret = $clientSecret
+    grant_type    = "client_credentials"
+}
 
-# Get all subscribed SKUs (license plans)
-$skus = Get-MgSubscribedSku -ExpandProperty
+$accessToken = $tokenResponse.access_token
+$Headers = @{Authorization = "Bearer $accessToken"} 
 
-Get-MgSubscribedSKU -all | Format-List
+$fromEmail = 'maintenance@shehabtech.info' #This should be a user or shared mailbox that the app has permission to send from
+$toEmail = 'shehab.noaman@gmail.com'
+$subject = "M365 License Summary - $(Get-Date -Format 'yyyy-MM-dd')"
 
-# Get all users with assigned licenses
-$users = Get-MgUser -All -Property DisplayName, UserPrincipalName, AssignedLicenses
 
-# Prepare results table
-$licenseReport = foreach ($sku in $skus) {
+# --- Authentication ---
+try {
+    Write-Host "Connecting to Microsoft Graph..."
+    #Connect-MgGraph -ClientId $clientId -TenantId $tenantId -ClientSecret $clientSecret -Scopes "Mail.Send", "Organization.Read.All" -ErrorAction Stop
+    Connect-MgGraph -Scopes "User.Read.All", "Organization.Read.All" -NoWelcome
+    Write-Host "Successfully connected to Microsoft Graph."
+
+} catch {
+    Write-Error "Failed to connect to Microsoft Graph: $($_.Exception.Message)"
+    exit 1
+}
+
+# --- Get M365 Subscriptions ---
+Write-Host "Retrieving M365 subscribed SKUs..."
+try {
+    $skus = Get-MgSubscribedSku -All -ErrorAction Stop # Removed Format-List here
+    Write-Host "Successfully retrieved subscribed SKUs."
+} catch {
+    Write-Error "Failed to retrieve subscribed SKUs: $($_.Exception.Message)"
+    exit 1
+}
+
+# --- Prepare License Report ---
+$licenseReport = @() # Initialize as an empty array to collect objects
+foreach ($sku in $skus) {
+    # Ensure properties exist before accessing them to prevent errors
     $skuId = $sku.SkuId
     $skuPartNumber = $sku.SkuPartNumber
     $total = $sku.PrepaidUnits.Enabled
     $assigned = $sku.ConsumedUnits
     $available = $total - $assigned
 
-    [PSCustomObject]@{
-        'SKU Name'    = $skuPartNumber
+    $licenseReport += [PSCustomObject]@{
+        'SKU Name'       = $skuPartNumber
         'Total Licenses' = $total
-        'Assigned'        = $assigned
-        'Available'       = $available
+        'Assigned'       = $assigned
+        'Available'      = $available
     }
 }
 
-# Display summary table
-$licenseReport | Format-Table -AutoSize
+$htmlBody = $licenseReport | ConvertTo-Html -Fragment -As Table -PreContent "<h2>M365 License Summary</h2>" | Out-String
 
-# Optional: Export to CSV
-$licenseReport | Export-Csv -Path "c:\temp\M365_License_Summary_$(Get-Date -Format yyyyMMdd).csv" -NoTypeInformation
+$emailContent = @"
+<html>
+<head>
+<style>
+    body { font-family: Arial, sans-serif; }
+    table { border-collapse: collapse; width: 80%; margin-top: 20px; }
+    th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+    th { background-color: #f2f2f2; }
+</style>
+</head>
+<body>
+$htmlBody
+</body>
+</html>
+"@
 
+# --- Send Email via Graph API ---
 
-
-
-# Detailed per-user license assignment (optional)
-$userLicenseDetails = foreach ($user in $users) {
-    $licenseSkus = ($user.AssignedLicenses | ForEach-Object { $_.SkuId }) -join "; "
-    [PSCustomObject]@{
-        'User'     = $user.DisplayName
-        'UPN'      = $user.UserPrincipalName
-        'SKUs'     = $licenseSkus
+$messageBody = @{
+message = @{
+    subject = $subject
+    body = @{
+        contentType = 'html' # Changed to HTML
+        content     = $emailContent
     }
+    toRecipients = @(
+        @{
+            emailAddress = @{
+                address = $toEmail
+            }
+        }
+    )
+}
+saveToSentItems = $true
 }
 
-# Export per-user details
-$userLicenseDetails | Export-Csv -Path ".\M365_User_Licenses_$(Get-Date -Format yyyyMMdd).csv" -NoTypeInformation
+# Send email
+Invoke-RestMethod -Method POST `
+    -Uri "https://graph.microsoft.com/v1.0/users/$fromEmail/sendMail" `
+    -Headers $Headers `
+    -Body ($messageBody  | ConvertTo-Json -Depth 10) `
+    -ContentType 'application/json'
 
+
+Disconnect-MgGraph # Disconnect from Graph when done
