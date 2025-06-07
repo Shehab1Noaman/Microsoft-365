@@ -1,0 +1,49 @@
+
+Connect-MgGraph -Scopes "User.Read.All", "Organization.Read.All"
+
+# Get all subscribed SKUs (license plans)
+$skus = Get-MgSubscribedSku -ExpandProperty
+
+Get-MgSubscribedSKU -all | Format-List
+
+# Get all users with assigned licenses
+$users = Get-MgUser -All -Property DisplayName, UserPrincipalName, AssignedLicenses
+
+# Prepare results table
+$licenseReport = foreach ($sku in $skus) {
+    $skuId = $sku.SkuId
+    $skuPartNumber = $sku.SkuPartNumber
+    $total = $sku.PrepaidUnits.Enabled
+    $assigned = $sku.ConsumedUnits
+    $available = $total - $assigned
+
+    [PSCustomObject]@{
+        'SKU Name'    = $skuPartNumber
+        'Total Licenses' = $total
+        'Assigned'        = $assigned
+        'Available'       = $available
+    }
+}
+
+# Display summary table
+$licenseReport | Format-Table -AutoSize
+
+# Optional: Export to CSV
+$licenseReport | Export-Csv -Path "c:\temp\M365_License_Summary_$(Get-Date -Format yyyyMMdd).csv" -NoTypeInformation
+
+
+
+
+# Detailed per-user license assignment (optional)
+$userLicenseDetails = foreach ($user in $users) {
+    $licenseSkus = ($user.AssignedLicenses | ForEach-Object { $_.SkuId }) -join "; "
+    [PSCustomObject]@{
+        'User'     = $user.DisplayName
+        'UPN'      = $user.UserPrincipalName
+        'SKUs'     = $licenseSkus
+    }
+}
+
+# Export per-user details
+$userLicenseDetails | Export-Csv -Path ".\M365_User_Licenses_$(Get-Date -Format yyyyMMdd).csv" -NoTypeInformation
+
